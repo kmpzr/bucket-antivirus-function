@@ -25,16 +25,18 @@ from common import AV_SCAN_START_METADATA
 from common import AV_SIGNATURE_METADATA
 from common import AV_SIGNATURE_OK
 from common import AV_STATUS_METADATA
+from common import AV_STATUS_CLEAN
 from common import AV_TIMESTAMP_METADATA
 from common import get_timestamp
 from scan import delete_s3_object
-from scan import event_object
+from scan import s3_object_from_event
 from scan import get_local_path
 from scan import set_av_metadata
 from scan import set_av_tags
 from scan import sns_start_scan
 from scan import sns_scan_results
 from scan import verify_s3_object_version
+from scan import skip_when_clean_metadata
 
 
 class TestScan(unittest.TestCase):
@@ -62,7 +64,7 @@ class TestScan(unittest.TestCase):
             ]
         }
         sns_event = {"Records": [{"Sns": {"Message": json.dumps(event)}}]}
-        s3_obj = event_object(sns_event, event_source="sns")
+        s3_obj = s3_object_from_event(sns_event, event_source="sns")
         expected_s3_object = self.s3.Object(self.s3_bucket_name, self.s3_key_name)
         self.assertEquals(s3_obj, expected_s3_object)
 
@@ -77,26 +79,26 @@ class TestScan(unittest.TestCase):
                 }
             ]
         }
-        s3_obj = event_object(event)
+        s3_obj = s3_object_from_event(event)
         expected_s3_object = self.s3.Object(self.s3_bucket_name, self.s3_key_name)
         self.assertEquals(s3_obj, expected_s3_object)
 
     def test_s3_event_object_missing_bucket(self):
         event = {"Records": [{"s3": {"object": {"key": self.s3_key_name}}}]}
         with self.assertRaises(Exception) as cm:
-            event_object(event)
+            s3_object_from_event(event)
             self.assertEquals(cm.exception.message, "No bucket found in event!")
 
     def test_s3_event_object_missing_key(self):
         event = {"Records": [{"s3": {"bucket": {"name": self.s3_bucket_name}}}]}
         with self.assertRaises(Exception) as cm:
-            event_object(event)
+            s3_object_from_event(event)
             self.assertEquals(cm.exception.message, "No key found in event!")
 
     def test_s3_event_object_bucket_key_missing(self):
         event = {"Records": [{"s3": {"bucket": {}, "object": {}}}]}
         with self.assertRaises(Exception) as cm:
-            event_object(event)
+            s3_object_from_event(event)
             self.assertEquals(
                 cm.exception.message,
                 "Unable to retrieve object from event.\n{}".format(event),
@@ -105,8 +107,43 @@ class TestScan(unittest.TestCase):
     def test_s3_event_object_no_records(self):
         event = {"Records": []}
         with self.assertRaises(Exception) as cm:
-            event_object(event)
+            s3_object_from_event(event)
             self.assertEquals(cm.exception.message, "No records found in event!")
+
+    def test_skip_when_clean_metadata_without_clean_status(self):
+        s3_obj = self.s3.Object(self.s3_bucket_name, self.s3_key_name)
+        s3_stubber_resource = Stubber(self.s3.meta.client)
+
+        head_object_response = {"ContentType": "content", "Metadata": {}}
+        head_object_expected_params = {
+            "Bucket": self.s3_bucket_name,
+            "Key": self.s3_key_name,
+        }
+        s3_stubber_resource.add_response(
+            "head_object", head_object_response, head_object_expected_params
+        )
+        with s3_stubber_resource:
+            self.assertFalse(skip_when_clean_metadata(s3_obj, "True"))
+            self.assertFalse(skip_when_clean_metadata(s3_obj, "False"))
+
+    def test_skip_when_clean_metadata_with_clean_status(self):
+        s3_obj = self.s3.Object(self.s3_bucket_name, self.s3_key_name)
+        s3_stubber_resource = Stubber(self.s3.meta.client)
+
+        head_object_response = {
+            "ContentType": "content",
+            "Metadata": {AV_STATUS_METADATA: AV_STATUS_CLEAN},
+        }
+        head_object_expected_params = {
+            "Bucket": self.s3_bucket_name,
+            "Key": self.s3_key_name,
+        }
+        s3_stubber_resource.add_response(
+            "head_object", head_object_response, head_object_expected_params
+        )
+        with s3_stubber_resource:
+            self.assertTrue(skip_when_clean_metadata(s3_obj, "True"))
+            self.assertFalse(skip_when_clean_metadata(s3_obj, "False"))
 
     def test_verify_s3_object_version(self):
         s3_obj = self.s3.Object(self.s3_bucket_name, self.s3_key_name)

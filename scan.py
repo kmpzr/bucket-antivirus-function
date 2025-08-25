@@ -37,13 +37,14 @@ from common import AV_STATUS_SNS_ARN
 from common import AV_STATUS_SNS_PUBLISH_CLEAN
 from common import AV_STATUS_SNS_PUBLISH_INFECTED
 from common import AV_TIMESTAMP_METADATA
+from common import AV_SKIP_CLEAN_OBJECTS
 from common import SNS_ENDPOINT
 from common import S3_ENDPOINT
 from common import create_dir
 from common import get_timestamp
 
 
-def event_object(event, event_source="s3"):
+def s3_object_from_event(event, event_source="s3"):
     # SNS events are slightly different
     if event_source.upper() == "SNS":
         event = json.loads(event["Records"][0]["Sns"]["Message"])
@@ -73,7 +74,6 @@ def event_object(event, event_source="s3"):
     if (not bucket_name) or (not key_name):
         raise Exception("Unable to retrieve object from event.\n{}".format(event))
 
-    # Create and return the object
     s3 = boto3.resource("s3", endpoint_url=S3_ENDPOINT)
     return s3.Object(bucket_name, key_name)
 
@@ -209,7 +209,11 @@ def lambda_handler(event, context):
 
     start_time = get_timestamp()
     print("Script starting at %s\n" % (start_time))
-    s3_object = event_object(event, event_source=EVENT_SOURCE)
+    s3_object = s3_object_from_event(event, EVENT_SOURCE)
+
+    if skip_when_clean_metadata(s3_object, AV_SKIP_CLEAN_OBJECTS):
+        print("Object marked as clean with metadata, skipping...")
+        return
 
     if str_to_bool(AV_PROCESS_ORIGINAL_VERSION_ONLY):
         verify_s3_object_version(s3, s3_object)
@@ -272,3 +276,12 @@ def lambda_handler(event, context):
 
 def str_to_bool(s):
     return bool(strtobool(str(s)))
+
+
+def skip_when_clean_metadata(s3_object, av_skip_clean_objects):
+    if str_to_bool(av_skip_clean_objects) and (
+        s3_object.metadata.get(AV_STATUS_METADATA, None) == AV_STATUS_CLEAN
+    ):
+        return True
+
+    return False
